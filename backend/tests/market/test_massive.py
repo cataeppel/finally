@@ -1,4 +1,4 @@
-"""MARKET_DATA_DESIGN.md §17.3. All via respx -- never hit api.massive.com."""
+"""MARKET_DATA.md §10. All via respx -- never hit api.massive.com."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -29,8 +29,8 @@ BASE = "https://api.massive.com"
 
 async def test_403_on_the_probe_selects_grouped_mode():
     with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        mock.get(url__startswith="/v2/snapshot").mock(return_value=httpx.Response(403))
-        mock.get(url__startswith="/v2/aggs/grouped").mock(
+        mock.get(path__startswith="/v2/snapshot").mock(return_value=httpx.Response(403))
+        mock.get(path__startswith="/v2/aggs/grouped").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "grouped_daily.json"))
         )
         src = MassiveSource(api_key="k")
@@ -43,7 +43,7 @@ async def test_403_on_the_probe_selects_grouped_mode():
 
 async def test_401_propagates_out_of_start():
     with respx.mock(base_url=BASE) as mock:
-        mock.get(url__startswith="/v2/snapshot").mock(return_value=httpx.Response(401))
+        mock.get(path__startswith="/v2/snapshot").mock(return_value=httpx.Response(401))
         src = MassiveSource(api_key="bad")
         with pytest.raises(MassiveAuthError):
             await src.start()
@@ -52,10 +52,10 @@ async def test_401_propagates_out_of_start():
 
 async def test_403_mid_flight_switches_mode_without_raising():
     with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        snapshot_route = mock.get(url__startswith="/v2/snapshot").mock(
+        snapshot_route = mock.get(path__startswith="/v2/snapshot").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "snapshot_aapl_msft.json"))
         )
-        mock.get(url__startswith="/v2/aggs/grouped").mock(
+        mock.get(path__startswith="/v2/aggs/grouped").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "grouped_daily.json"))
         )
         src = MassiveSource(api_key="k")
@@ -72,7 +72,7 @@ async def test_403_mid_flight_switches_mode_without_raising():
 
 async def test_429_raises_the_interval_and_re_raises():
     with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        snapshot_route = mock.get(url__startswith="/v2/snapshot").mock(
+        snapshot_route = mock.get(path__startswith="/v2/snapshot").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "snapshot_aapl_msft.json"))
         )
         src = MassiveSource(api_key="k")
@@ -89,7 +89,7 @@ async def test_429_raises_the_interval_and_re_raises():
 
 async def test_429_interval_is_monotonic():
     with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        snapshot_route = mock.get(url__startswith="/v2/snapshot").mock(
+        snapshot_route = mock.get(path__startswith="/v2/snapshot").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "snapshot_aapl_msft.json"))
         )
         src = MassiveSource(api_key="k")
@@ -113,7 +113,7 @@ async def test_trading_date_walks_back_over_a_weekend():
     empty = load_fixture("massive", "empty_results.json")
     populated = load_fixture("massive", "grouped_daily.json")
     with respx.mock(base_url=BASE) as mock:
-        route = mock.get(url__startswith="/v2/aggs/grouped")
+        route = mock.get(path__startswith="/v2/aggs/grouped")
         route.side_effect = [
             httpx.Response(200, json=empty),
             httpx.Response(200, json=empty),
@@ -135,8 +135,8 @@ async def test_trading_date_refreshes_once_per_et_day():
     from app.market.massive import EASTERN
 
     with respx.mock(base_url=BASE, assert_all_called=False) as mock:
-        mock.get(url__startswith="/v2/snapshot").mock(return_value=httpx.Response(403))
-        route = mock.get(url__startswith="/v2/aggs/grouped").mock(
+        mock.get(path__startswith="/v2/snapshot").mock(return_value=httpx.Response(403))
+        route = mock.get(path__startswith="/v2/aggs/grouped").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "grouped_daily.json"))
         )
         src = MassiveSource(api_key="k")
@@ -145,19 +145,19 @@ async def test_trading_date_refreshes_once_per_et_day():
 
         today = datetime.now(EASTERN).date()
         src._date_resolved_on = today
-        await src.fetch()          # same ET day -> no extra resolution call
-        calls_same_day = route.call_count
-        assert calls_same_day == 1
+        before = route.call_count                           # 1: resolution inside start()
+        await src.fetch()          # same ET day -> the data call only, no re-resolution
+        assert route.call_count == before + 1
 
         src._date_resolved_on = today - timedelta(days=1)   # simulate a stale rollover
-        await src.fetch()
-        assert route.call_count == calls_same_day + 1
+        await src.fetch()          # re-resolve the date, THEN fetch the bars
+        assert route.call_count == before + 3
         await src.aclose()
 
 
 async def test_bearer_header_is_used_and_the_key_is_never_in_a_url():
     with respx.mock(base_url=BASE) as mock:
-        route = mock.get(url__startswith="/v2/snapshot").mock(
+        route = mock.get(path__startswith="/v2/snapshot").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "snapshot_aapl_msft.json"))
         )
         client = MassiveClient(api_key="super-secret-key", base_url=BASE)
@@ -182,7 +182,7 @@ def test_zero_filled_day_falls_through_to_prev_close():
     """In the 3:30-4:00 AM ET cleared-snapshot window `day` is zero-filled. Both the
     price fallback (lastTrade -> min -> day -> prevDay.c) and the session_open
     fallback (day.o -> prevDay.c -> price) bottom out at prevDay's CLOSE -- there is
-    no prevDay.o in the chain (MARKET_DATA_DESIGN.md §8.3), so with day and min also
+    no prevDay.o in the chain (MARKET_DATA.md §5), so with day and min also
     empty, price and session_open both land on prevDay.c."""
     row = {
         "ticker": "AAPL",
@@ -205,7 +205,7 @@ def test_snapshot_row_without_any_price_returns_none():
 
 async def test_missing_tickers_are_absent_not_errors():
     with respx.mock(base_url=BASE) as mock:
-        mock.get(url__startswith="/v2/snapshot").mock(
+        mock.get(path__startswith="/v2/snapshot").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "snapshot_aapl_msft.json"))
         )
         client = MassiveClient(api_key="k", base_url=BASE)
@@ -216,7 +216,7 @@ async def test_missing_tickers_are_absent_not_errors():
 
 async def test_grouped_keeps_only_tracked_tickers():
     with respx.mock(base_url=BASE) as mock:
-        mock.get(url__startswith="/v2/aggs/grouped").mock(
+        mock.get(path__startswith="/v2/aggs/grouped").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "grouped_daily.json"))
         )
         client = MassiveClient(api_key="k", base_url=BASE)
@@ -229,7 +229,7 @@ async def test_grouped_quote_timestamp_is_the_bar_not_now():
     """The C3 regression guard: two polls of the same body produce equal Quotes,
     so PriceCache.apply() dedupes them instead of emitting a fresh `flat` tick."""
     with respx.mock(base_url=BASE) as mock:
-        mock.get(url__startswith="/v2/aggs/grouped").mock(
+        mock.get(path__startswith="/v2/aggs/grouped").mock(
             return_value=httpx.Response(200, json=load_fixture("massive", "grouped_daily.json"))
         )
         client = MassiveClient(api_key="k", base_url=BASE)

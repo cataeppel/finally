@@ -1,10 +1,10 @@
 # backend/app/main.py
 """FastAPI application entrypoint.
 
-Only the market data module (PLAN.md §6, MARKET_DATA_DESIGN.md) is implemented so
+Only the market data module (PLAN.md §6, MARKET_DATA.md) is implemented so
 far. Portfolio, watchlist and chat routers are out of scope for this build and are
 added by other agents on top of `MarketDataService` — see the module boundary in
-MARKET_DATA_DESIGN.md §1.
+MARKET_DATA.md §1.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .routes.market import router as market_router
 
 #: The ten default watchlist tickers (PLAN.md §7 seed data). Until the watchlist/
 #: portfolio backend lands there is no database to compute `watchlist ∪ held` from
-#: (MARKET_DATA_DESIGN.md §13.3's `refresh_tracked`), so the tracked set is pinned
+#: (MARKET_DATA.md §7's tracked ticker set), so the tracked set is pinned
 #: to the defaults for this build. Wire `refresh_tracked()` here once that module
 #: exists — this constant is exactly the placeholder it should replace.
 DEFAULT_WATCHLIST = frozenset(

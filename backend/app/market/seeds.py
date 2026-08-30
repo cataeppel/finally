@@ -14,7 +14,7 @@ from enum import Enum
 
 
 class Sector(str, Enum):
-    """Drives the sector factor in the correlation model (MARKET_SIMULATOR.md §3)."""
+    """Drives the sector factor in the correlation model (MARKET_DATA.md §4)."""
 
     TECH = "tech"
     CONSUMER = "consumer"

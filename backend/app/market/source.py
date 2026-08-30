@@ -45,7 +45,7 @@ class MarketDataSource(abc.ABC):
 
         Default: nothing. A real-data source must never invent a price, so
         MassiveSource keeps this default and a newly added ticker legitimately
-        has no price until the next poll (MARKET_DATA_DESIGN.md §7.4).
+        has no price until the next poll (MARKET_DATA.md §7).
 
         SimulatedSource overrides it to return the seed price immediately, which
         is not an invention — the seed price is the ticker's opening price by

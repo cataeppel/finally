@@ -1,4 +1,4 @@
-"""MARKET_DATA_DESIGN.md §17.6 -- the market half of the API surface."""
+"""MARKET_DATA.md §10 -- the market half of the API surface."""
 from __future__ import annotations
 
 import re
@@ -6,6 +6,7 @@ import re
 import httpx
 import pytest
 from fastapi import FastAPI
+from starlette.requests import Request
 
 from app.market.service import MarketDataService
 from app.market.simulator import SimulatedSource
@@ -64,46 +65,68 @@ async def test_history_lowercases_are_normalised_to_upper(client, svc):
     assert resp.json()["ticker"] == "AAPL"
 
 
-async def test_sse_emits_a_status_frame_first_then_ticks(client, svc):
-    await wait_for(lambda: svc.price("AAPL") is not None, timeout=5)
-    async with client.stream("GET", "/api/stream/prices") as resp:
-        assert resp.status_code == 200
-        lines: list[str] = []
-        async for line in resp.aiter_lines():
-            lines.append(line)
-            if len(lines) >= 4:
+def _scope_request() -> Request:
+    """The minimal Request the route needs. `stream_prices` never reads it -- Starlette
+    injects it, and the disconnect it represents arrives as generator cancellation."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/stream/prices",
+            "headers": [],
+            "query_string": b"",
+        }
+    )
+
+
+async def _frames(svc: MarketDataService, *, limit: int) -> list[str]:
+    """Read `limit` SSE frames straight off the route's async generator.
+
+    NOT through httpx: `httpx.ASGITransport` awaits the ASGI app to completion and
+    buffers the whole body before returning a response, so an endless SSE endpoint
+    hangs it forever. Starlette pulls `StreamingResponse.body_iterator` one chunk at a
+    time, which is exactly what this does -- the same code path the server runs, minus
+    the socket. Closing the generator is what a client disconnect does.
+    """
+    response = await market_routes.stream_prices(_scope_request(), svc)
+    agen = response.body_iterator
+    out: list[str] = []
+    try:
+        async for chunk in agen:
+            out.append(chunk if isinstance(chunk, str) else chunk.decode())
+            if len(out) >= limit:
                 break
-    text = "\n".join(lines)
-    assert "event: status" in text
-    status_idx = text.index("event: status")
-    first_data_idx = text.index("data:")
-    assert status_idx <= first_data_idx
+    finally:
+        await agen.aclose()
+    return out
+
+
+async def test_sse_emits_a_status_frame_first_then_ticks(svc):
+    await wait_for(lambda: svc.price("AAPL") is not None, timeout=5)
+    frames = await _frames(svc, limit=3)
+    assert frames[0].startswith("event: status\ndata: ")
+    ticks = [f for f in frames[1:] if f.startswith("data: ")]
+    assert ticks, frames
+    assert '"ticker": "AAPL"' in ticks[0]
 
 
 async def test_sse_sends_a_heartbeat_when_idle(monkeypatch):
-    """Uses a dedicated service with NO tracked tickers -- the `svc` fixture tracks
-    AAPL and would keep the subscriber's queue busy, so it would never idle down to
-    the heartbeat path within a reasonable test timeout."""
+    """A dedicated service with NO tracked tickers -- the `svc` fixture tracks AAPL and
+    would keep the subscriber's queue busy, so it would never idle down to the
+    heartbeat path within a reasonable test timeout."""
     monkeypatch.setattr(market_routes, "HEARTBEAT_SECONDS", 0.05)
     idle_service = MarketDataService(SimulatedSource(seed=1, interval=0.02))
     await idle_service.start()
-    app = _make_app(idle_service)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        async with c.stream("GET", "/api/stream/prices") as resp:
-            saw_ping = False
-            async for line in resp.aiter_lines():
-                if line.startswith(": ping"):
-                    saw_ping = True
-                    break
-    await idle_service.stop()
-    assert saw_ping
+    try:
+        frames = await _frames(idle_service, limit=2)
+    finally:
+        await idle_service.stop()
+    assert frames[0].startswith("event: status")
+    assert frames[1] == ": ping\n\n"
 
 
-async def test_sse_unsubscribes_on_client_disconnect(client, svc):
-    async with client.stream("GET", "/api/stream/prices") as resp:
-        async for _ in resp.aiter_lines():
-            break
+async def test_sse_unsubscribes_on_client_disconnect(svc):
+    await _frames(svc, limit=1)          # the generator is closed on the way out
     await wait_for(lambda: svc.health["subscribers"] == 0, timeout=5)
 
 

@@ -62,7 +62,7 @@ class MassiveClient:
         resp = await self._client.get(path, params=params or None)
         rid = resp.headers.get("x-request-id", "?")
         # Branch on the STATUS CODE, never on body text: the 401 bodies are verified,
-        # the 403 body shape is reported but unverified (MASSIVE_API.md §6).
+        # the 403 body shape is reported but unverified (MARKET_DATA.md §5).
         if resp.status_code == 401:
             raise MassiveAuthError(f"{path}: bad or missing API key (request_id={rid})")
         if resp.status_code == 403:
@@ -86,7 +86,14 @@ class MassiveClient:
         if not tickers:
             return []
         body = await self._get(SNAPSHOT_PATH, tickers=",".join(sorted(tickers)))
-        quotes = [q for row in body.get("tickers", ()) if (q := _parse_snapshot_row(row))]
+        # Filter to what we asked for. Upstream should only return the requested
+        # symbols, but a source must never quote a ticker outside the tracked set --
+        # the cache would mint state for it and the SSE stream would carry it.
+        quotes = [
+            q
+            for row in body.get("tickers", ())
+            if row.get("ticker") in tickers and (q := _parse_snapshot_row(row))
+        ]
         # Unknown symbols are simply ABSENT from the response — there is no per-ticker
         # error object on v2. Diff and log; leave them on their cached value.
         missing = tickers - {q.ticker for q in quotes}

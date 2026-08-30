@@ -13,7 +13,7 @@ _MIN_PRICE, _MAX_PRICE = 20.0, 500.0
 
 def test_known_tickers_use_the_table():
     assert spec_for("AAPL").price == 190.00
-    # AMD is in the table at 160.00 -- the hash alone would say 104.85 (MARKET_DATA_DESIGN.md
+    # AMD is in the table at 160.00 -- the hash alone would say 104.85 (MARKET_DATA.md
     # §16.2 C1), so the table must win.
     assert spec_for("AMD").price == 160.00
     assert SEED_PRICES["AMD"] is spec_for("AMD")
@@ -64,7 +64,7 @@ def test_unknown_ticker_is_never_rejected():
 
 
 def test_snow_reference_value():
-    """MARKET_DATA_DESIGN.md §16.2 C1: PYPL is in the table so 178.51 is the wrong
+    """MARKET_DATA.md §4: PYPL is in the table so 178.51 is the wrong
     determinism literal. SNOW is genuinely absent from the table."""
     assert "SNOW" not in SEED_PRICES
     assert spec_for("SNOW").price == 348.97

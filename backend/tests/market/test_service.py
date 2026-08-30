@@ -1,15 +1,30 @@
-"""MARKET_DATA_DESIGN.md §17.5. The failure ladder is policy, so it is tested
+"""MARKET_DATA.md §10. The failure ladder is policy, so it is tested
 directly against a fake source rather than a real GBM engine or respx fixtures."""
 from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from app.market import service as service_module
 from app.market.service import MarketDataService
 from app.market.simulator import SimulatedSource
 from app.market.source import MarketDataSource
 from app.market.types import Quote, StreamStatus, utcnow
 
 from ..conftest import wait_for
+
+
+@pytest.fixture(autouse=True)
+def deterministic_backoff(monkeypatch):
+    """Pin the ladder's jitter to its floor.
+
+    `_produce` waits `min(60, 2**failures) * (0.5 + random())` between failures, i.e.
+    1-3 s and then 2-6 s, so "did it fall back within 5 s?" is a coin flip and these
+    tests fail against correct code perhaps a third of the time. With random() == 0 the
+    delays are exactly 1 s and 2 s and the third failure lands at ~3 s.
+    """
+    monkeypatch.setattr(service_module.random, "random", lambda: 0.0)
 
 
 class FlakySource(MarketDataSource):
@@ -58,7 +73,7 @@ async def test_three_consecutive_failures_fall_back_to_the_simulator():
     svc = MarketDataService(FlakySource(fail_times=99))
     await svc.start()
     svc.set_tracked(frozenset({"AAPL"}))
-    await wait_for(lambda: svc.health["source"] == "simulator", timeout=5)
+    await wait_for(lambda: svc.health["source"] == "simulator", timeout=10)
     assert svc.status is StreamStatus.DEGRADED
     assert "upstream unavailable" in svc.health["reason"]
     await svc.stop()
@@ -80,13 +95,13 @@ async def test_fallback_closes_the_old_source():
     svc = MarketDataService(flaky)
     await svc.start()
     svc.set_tracked(frozenset({"AAPL"}))
-    await wait_for(lambda: flaky.closed, timeout=5)
+    await wait_for(lambda: flaky.closed, timeout=10)
     await svc.stop()
 
 
 async def test_fallback_happens_once():
     """`_fall_back` only replaces a source that is NOT already a `SimulatedSource`
-    (MARKET_DATA_DESIGN.md §10): once the fallback is installed, further failures
+    (MARKET_DATA.md §7): once the fallback is installed, further failures
     are logged and left in place rather than triggering another swap."""
 
     class FailingSimulator(SimulatedSource):
@@ -97,7 +112,7 @@ async def test_fallback_happens_once():
     svc = MarketDataService(flaky, fallback_factory=lambda: FailingSimulator(seed=1, interval=0.01))
     await svc.start()
     svc.set_tracked(frozenset({"AAPL"}))
-    await wait_for(lambda: isinstance(svc._source, SimulatedSource), timeout=5)
+    await wait_for(lambda: isinstance(svc._source, SimulatedSource), timeout=10)
     replacement = svc._source
     # the replacement keeps failing every fetch(); give it several poll intervals
     # and confirm the guard prevents any further swap.

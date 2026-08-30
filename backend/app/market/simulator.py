@@ -31,7 +31,7 @@ EVENT_ANCHOR_SHARE = 0.5                    # half the jump persists
 
 #: Mean beta over SEED_PRICES. A CONSTANT, deliberately not the mean over the current
 #: watchlist: a ticker's volatility and correlations must not change because someone
-#: else added TSLA. See MARKET_DATA_DESIGN.md §7.3.
+#: else added TSLA. See MARKET_DATA.md §4.
 MEAN_BETA = 1.08
 
 MIN_PRICE = 0.01

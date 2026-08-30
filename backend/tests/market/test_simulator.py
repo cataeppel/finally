@@ -1,4 +1,4 @@
-"""MARKET_DATA_DESIGN.md §17.2.
+"""MARKET_DATA.md §10.
 
 Every statistical test runs with BOTH `half_life_hours=0.0` AND `event_prob=0.0`.
 Both are required: kappa=0 makes the analytic result exact, and disabling jumps
@@ -168,7 +168,7 @@ def test_event_moves_the_anchor_halfway():
 def test_prices_are_rounded_to_cents_but_state_is_not():
     """Emitted prices have <=2 decimals, but internal log_price retains full float
     precision -- rounding the state itself would inject a bias on every tick
-    (MARKET_DATA_DESIGN.md §7.5)."""
+    (MARKET_DATA.md §4)."""
     eng = GbmEngine(seed=2)
     tickers = frozenset({"LCID"})   # a cheap stock, $3.20 seed
     quotes = []

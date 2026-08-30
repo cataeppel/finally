@@ -1,7 +1,7 @@
 # backend/app/routes/market.py
 """The market half of the API: SSE price stream, history, health.
 
-PLAN.md §8. Owned by the market data module per MARKET_DATA_DESIGN.md §1 — the
+PLAN.md §8. Owned by the market data module per MARKET_DATA.md §1 — the
 database, trades, positions, watchlist and LLM chat are out of scope here and are
 built by other agents on top of MarketDataService.
 """

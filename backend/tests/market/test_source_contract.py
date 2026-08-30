@@ -1,5 +1,5 @@
 """The interface earns its keep only if both implementations are held to the same
-suite (MARKET_DATA_DESIGN.md §17.1)."""
+suite (MARKET_DATA.md §10)."""
 from __future__ import annotations
 
 import pytest
@@ -33,7 +33,7 @@ async def source(request):
         await src.aclose()
         return
     with respx.mock(base_url="https://api.massive.com", assert_all_called=False) as mock:
-        mock.get(url__startswith="/v2/snapshot").mock(side_effect=_snapshot_callback)
+        mock.get(path__startswith="/v2/snapshot").mock(side_effect=_snapshot_callback)
         src = MassiveSource(api_key="test-key")
         await src.start()
         yield src

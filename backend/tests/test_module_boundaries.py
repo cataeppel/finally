@@ -1,4 +1,4 @@
-"""Enforces MARKET_DATA_DESIGN.md §2's one-way import graph:
+"""Enforces MARKET_DATA.md §1's one-way import graph:
 
     service -> cache -> types
        |        ^
