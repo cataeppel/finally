@@ -1,48 +1,107 @@
-"""Mock LLM responses for testing (LLM_MOCK=true)."""
+"""Deterministic mock LLM responses for testing (LLM_MOCK=true).
+
+Used by E2E tests and by anyone running without an OPENROUTER_API_KEY. Given
+the same message and portfolio context, `mock_chat` always returns the same
+`LlmResponse` — it never calls the network.
+
+Supported triggers (matched in this order, case-insensitive):
+
+    "buy 10 AAPL" / "buy 10 shares of AAPL"     -> executes a buy
+    "sell 10 AAPL" / "sell 10 shares of AAPL"   -> executes a sell
+    "add PYPL to my watchlist" / "watch PYPL"   -> watchlist add
+    "remove AAPL from my watchlist" /
+        "unwatch AAPL" / "stop watching AAPL"   -> watchlist remove
+    anything containing portfolio / positions /
+        holdings / analyze / analysis / p&l     -> portfolio summary
+    anything else                               -> greeting
+
+Trades and watchlist changes still go through the real validation path, so an
+unaffordable mock buy produces a genuine "Insufficient cash" error — which is
+how E2E tests exercise the failure path (e.g. "buy 100000 AAPL").
+"""
 
 import re
 
 from .models import LlmResponse, TradeAction, WatchlistChange
 
+_QTY = r"(\d+(?:\.\d+)?)"
+_TICKER = r"([A-Za-z][A-Za-z0-9.\-]{0,9})"
+
+_BUY_RE = re.compile(rf"\bbuy\s+{_QTY}\s+(?:shares?\s+(?:of\s+)?)?{_TICKER}\b", re.I)
+_SELL_RE = re.compile(rf"\bsell\s+{_QTY}\s+(?:shares?\s+(?:of\s+)?)?{_TICKER}\b", re.I)
+
+_WATCH_ADD_RE = re.compile(
+    rf"(?:\bwatch\s+{_TICKER}\b|\badd\s+{_TICKER}\s+to\s+(?:my\s+|the\s+)?watchlist\b)", re.I
+)
+_WATCH_REMOVE_RE = re.compile(
+    rf"(?:\b(?:unwatch|stop\s+watching)\s+{_TICKER}\b"
+    rf"|\bremove\s+{_TICKER}\s+from\s+(?:my\s+|the\s+)?watchlist\b)",
+    re.I,
+)
+
+_PORTFOLIO_KEYWORDS = ("portfolio", "positions", "holdings", "analyze", "analysis", "p&l", "pnl")
+
+GREETING = (
+    "I'm FinAlly, your AI trading assistant. I can analyze your portfolio, "
+    "execute trades, and manage your watchlist. How can I help?"
+)
+
+
+def _first_group(match: re.Match) -> str:
+    """The first non-None capture group — the alternations capture in different slots."""
+    return next(g for g in match.groups() if g is not None)
+
+
+def _format_quantity(quantity: float) -> str:
+    return f"{quantity:g}"
+
 
 def mock_chat(user_message: str, context: dict) -> LlmResponse:
-    """Return deterministic responses based on simple keyword matching."""
-    msg = user_message.lower().strip()
+    """Return a deterministic response for `user_message` given the portfolio context."""
+    msg = (user_message or "").strip()
+    lowered = msg.lower()
 
-    # Buy request: "buy 10 AAPL" or "buy 5 shares of MSFT"
-    buy_match = re.search(r"buy\s+(\d+)\s+(?:shares?\s+(?:of\s+)?)?(\w+)", msg)
-    if buy_match:
-        qty = float(buy_match.group(1))
-        ticker = buy_match.group(2).upper()
+    buy = _BUY_RE.search(msg)
+    if buy:
+        quantity = float(buy.group(1))
+        ticker = buy.group(2).upper()
         return LlmResponse(
-            message=f"Executing purchase of {int(qty)} shares of {ticker}.",
-            trades=[TradeAction(ticker=ticker, side="buy", quantity=qty)],
+            message=f"Executing purchase of {_format_quantity(quantity)} shares of {ticker}.",
+            trades=[TradeAction(ticker=ticker, side="buy", quantity=quantity)],
         )
 
-    # Sell request: "sell 10 AAPL" or "sell 5 shares of MSFT"
-    sell_match = re.search(r"sell\s+(\d+)\s+(?:shares?\s+(?:of\s+)?)?(\w+)", msg)
-    if sell_match:
-        qty = float(sell_match.group(1))
-        ticker = sell_match.group(2).upper()
+    sell = _SELL_RE.search(msg)
+    if sell:
+        quantity = float(sell.group(1))
+        ticker = sell.group(2).upper()
         return LlmResponse(
-            message=f"Executing sale of {int(qty)} shares of {ticker}.",
-            trades=[TradeAction(ticker=ticker, side="sell", quantity=qty)],
+            message=f"Executing sale of {_format_quantity(quantity)} shares of {ticker}.",
+            trades=[TradeAction(ticker=ticker, side="sell", quantity=quantity)],
         )
 
-    # Add to watchlist: "watch PYPL" or "add PYPL to watchlist"
-    watch_match = re.search(r"(?:watch|add)\s+(\w+)", msg)
-    if watch_match and "watchlist" in msg or msg.startswith("watch "):
-        ticker = watch_match.group(1).upper()
+    # Removal is checked before addition so "remove X from my watchlist" is not
+    # mistaken for an add by the bare "watch X" alternative.
+    remove = _WATCH_REMOVE_RE.search(msg)
+    if remove:
+        ticker = _first_group(remove).upper()
+        return LlmResponse(
+            message=f"Removing {ticker} from your watchlist.",
+            watchlist_changes=[WatchlistChange(ticker=ticker, action="remove")],
+        )
+
+    add = _WATCH_ADD_RE.search(msg)
+    if add:
+        ticker = _first_group(add).upper()
         return LlmResponse(
             message=f"Adding {ticker} to your watchlist.",
             watchlist_changes=[WatchlistChange(ticker=ticker, action="add")],
         )
 
-    # Portfolio analysis
-    if any(kw in msg for kw in ["portfolio", "positions", "holdings", "analysis"]):
-        cash = context.get("cash", 0)
-        positions = context.get("positions", [])
+    if any(keyword in lowered for keyword in _PORTFOLIO_KEYWORDS):
+        cash = context.get("cash", 0.0)
+        positions = context.get("positions") or []
         total_value = context.get("total_value", cash)
+
         if positions:
             tickers = ", ".join(p["ticker"] for p in positions)
             return LlmResponse(
@@ -58,10 +117,4 @@ def mock_chat(user_message: str, context: dict) -> LlmResponse:
             ),
         )
 
-    # Default greeting / fallback
-    return LlmResponse(
-        message=(
-            "I'm FinAlly, your AI trading assistant. I can analyze your portfolio, "
-            "execute trades, and manage your watchlist. How can I help?"
-        ),
-    )
+    return LlmResponse(message=GREETING)

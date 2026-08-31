@@ -1,11 +1,10 @@
 """Fixtures for route tests."""
 
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.db import init_db, set_db_path
-from app.market import PriceCache
+from app.db import get_watchlist_tickers, init_db, set_db_path
+from app.market import MarketDataSource, PriceCache
 
 
 @pytest.fixture
@@ -29,8 +28,44 @@ def price_cache():
     return cache
 
 
+class FakeMarketSource(MarketDataSource):
+    """In-memory MarketDataSource that seeds a price on add, like the simulator."""
+
+    SEED_PRICE = 100.0
+
+    def __init__(self, cache: PriceCache, tickers: list[str]):
+        self._cache = cache
+        self._tickers = list(tickers)
+
+    async def start(self, tickers: list[str]) -> None:
+        self._tickers = list(tickers)
+
+    async def stop(self) -> None:
+        pass
+
+    async def add_ticker(self, ticker: str) -> None:
+        if ticker not in self._tickers:
+            self._tickers.append(ticker)
+        if self._cache.get_price(ticker) is None:
+            self._cache.update(ticker, self.SEED_PRICE)
+
+    async def remove_ticker(self, ticker: str) -> None:
+        if ticker in self._tickers:
+            self._tickers.remove(ticker)
+        self._cache.remove(ticker)
+
+    def get_tickers(self) -> list[str]:
+        return list(self._tickers)
+
+
 @pytest.fixture
-async def client(test_db, price_cache):
+async def market_source(test_db, price_cache):
+    """A fake source already tracking the seeded watchlist, as after startup."""
+    return FakeMarketSource(price_cache, await get_watchlist_tickers())
+
+
+@pytest.fixture
+async def client(test_db, price_cache, market_source):
     """Async HTTP client wired to the FastAPI app, bypassing lifespan."""
     from fastapi import FastAPI
 
@@ -38,7 +73,7 @@ async def client(test_db, price_cache):
     from app.routes.portfolio import router as portfolio_router
     from app.routes.watchlist import router as watchlist_router
 
-    # Build a test app without the full lifespan (no market data source needed)
+    # Build a test app without the full lifespan (no real market data source)
     test_app = FastAPI()
     test_app.include_router(portfolio_router)
     test_app.include_router(watchlist_router)
@@ -48,13 +83,8 @@ async def client(test_db, price_cache):
     async def health():
         return {"status": "ok"}
 
-    # Mock market source
-    class MockSource:
-        async def add_ticker(self, ticker): pass
-        async def remove_ticker(self, ticker): pass
-
     test_app.state.price_cache = price_cache
-    test_app.state.market_source = MockSource()
+    test_app.state.market_source = market_source
 
     transport = ASGITransport(app=test_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

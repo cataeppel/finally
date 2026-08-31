@@ -1,81 +1,150 @@
+/**
+ * PLAN.md §12 — "Buy shares: cash decreases, position appears, portfolio
+ * updates" and "Sell shares: cash increases, position updates or disappears."
+ *
+ * Prices move continuously, so cash assertions use a tolerance band around the
+ * expected trade value rather than an exact figure.
+ */
 import { test, expect } from "@playwright/test";
+import { ui } from "./selectors";
+import {
+  apiTrade,
+  ensureWatched,
+  flattenPosition,
+  getPortfolio,
+  openApp,
+  readMoney,
+} from "./helpers";
+
+/** Prices drift ~fractions of a percent per tick; 3% covers the round trip. */
+const TOLERANCE = 0.03;
 
 test.describe("Trading", () => {
-  test("buy shares — cash decreases, position appears", async ({ page }) => {
-    await page.goto("/");
+  test("buy via the trade bar — cash decreases, position appears", async ({ page, request }) => {
+    await ensureWatched(request, "AAPL");
+    await flattenPosition(request, "AAPL");
 
-    // Wait for prices to be streaming
-    await expect(page.getByText("Live")).toBeVisible({ timeout: 15_000 });
+    await openApp(page);
+    const cashBefore = await readMoney(ui.cashBalance(page));
 
-    // Wait for initial cash to display
-    await expect(page.getByText("$10,000.00").first()).toBeVisible({ timeout: 10_000 });
+    await ui.tradeTicker(page).fill("AAPL");
+    await ui.tradeQty(page).fill("5");
+    await ui.tradeBuy(page).click();
 
-    // Fill in the trade bar
-    const tickerInput = page.getByRole("textbox", { name: "Ticker", exact: true });
-    const qtyInput = page.getByPlaceholder("Qty");
-    await tickerInput.fill("AAPL");
-    await qtyInput.fill("5");
+    await expect(ui.tradeStatus(page)).toContainText(/BUY 5 AAPL/);
 
-    // Click BUY
-    await page.getByRole("button", { name: "BUY" }).click();
+    // Position appears in the table with the right quantity.
+    await expect(ui.positionRow(page, "AAPL")).toBeVisible();
+    await expect(ui.positionRow(page, "AAPL")).toContainText("5");
 
-    // Wait for trade confirmation message (green text in trade bar)
-    await expect(page.getByText(/BUY 5 AAPL/)).toBeVisible({ timeout: 10_000 });
+    // Cash fell by roughly 5 * price.
+    const api = await getPortfolio(request);
+    const position = api.positions.find((p) => p.ticker === "AAPL");
+    expect(position, "AAPL position missing from /api/portfolio").toBeDefined();
+    expect(position!.quantity).toBe(5);
 
-    // Cash should have decreased — check header no longer shows $10,000.00
-    // Allow time for the portfolio refresh
-    await page.waitForTimeout(2000);
+    await expect
+      .poll(async () => readMoney(ui.cashBalance(page)), { timeout: 20_000 })
+      .toBeLessThan(cashBefore);
 
-    // The cash balance in the header should be less than $10,000
-    const cashText = page.locator("header").getByText(/\$[\d,]+\.\d{2}/).nth(1);
-    const cash = await cashText.textContent();
-    expect(cash).toBeDefined();
-    const cashValue = parseFloat(cash!.replace(/[$,]/g, ""));
-    expect(cashValue).toBeLessThan(10_000);
-
-    // AAPL should appear in the positions table
-    const positionsSection = page.locator("text=Positions").first();
-    await expect(positionsSection).toBeVisible();
+    const cashAfter = await readMoney(ui.cashBalance(page));
+    const spent = cashBefore - cashAfter;
+    const expected = 5 * position!.avg_cost;
+    expect(Math.abs(spent - expected)).toBeLessThan(expected * TOLERANCE);
   });
 
-  test("sell shares — cash increases after buying", async ({ page }) => {
-    // Buy shares via API first to set up state
-    const buyRes = await page.request.post("/api/portfolio/trade", {
-      data: { ticker: "AAPL", side: "buy", quantity: 10 },
-    });
-    expect(buyRes.ok()).toBeTruthy();
+  test("portfolio total value tracks cash plus positions", async ({ page, request }) => {
+    await openApp(page);
 
-    await page.goto("/");
-    await expect(page.getByText("Live")).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(
+        async () => {
+          const api = await getPortfolio(request);
+          const shown = await readMoney(ui.portfolioValue(page));
+          return Math.abs(shown - api.total_value);
+        },
+        { timeout: 20_000 },
+      )
+      // Prices tick between the two reads, so allow a small drift.
+      .toBeLessThan(50);
+  });
 
-    // Wait for portfolio to load and show non-$10k cash
-    await page.waitForTimeout(3000);
+  test("partial sell via the trade bar — cash increases, quantity reduces", async ({
+    page,
+    request,
+  }) => {
+    await ensureWatched(request, "MSFT");
+    await flattenPosition(request, "MSFT");
+    await apiTrade(request, "MSFT", "buy", 10);
 
-    // Record cash after buying
-    const cashAfterBuy = page.locator("header").getByText(/\$[\d,]+\.\d{2}/).nth(1);
-    const cashBuyText = await cashAfterBuy.textContent();
-    const cashAfterBuyValue = parseFloat(cashBuyText!.replace(/[$,]/g, ""));
+    await openApp(page);
+    await expect(ui.positionRow(page, "MSFT")).toBeVisible();
+    const cashBefore = await readMoney(ui.cashBalance(page));
 
-    // Now sell some shares via the UI
-    const tickerInput = page.getByRole("textbox", { name: "Ticker", exact: true });
-    const qtyInput = page.getByPlaceholder("Qty");
-    await tickerInput.fill("AAPL");
-    await qtyInput.fill("5");
-    // The SELL button can be obscured by a layout overlap, so use JS to click
-    const sellButton = page.getByRole("button", { name: "SELL" });
-    await sellButton.evaluate((el: HTMLElement) => el.click());
+    await ui.tradeTicker(page).fill("MSFT");
+    await ui.tradeQty(page).fill("4");
+    await ui.tradeSell(page).click();
 
-    // Wait for trade confirmation
-    await expect(page.getByText(/SELL 5 AAPL/)).toBeVisible({ timeout: 10_000 });
+    await expect(ui.tradeStatus(page)).toContainText(/SELL 4 MSFT/);
 
-    // Wait for portfolio to refresh
-    await page.waitForTimeout(3000);
+    await expect
+      .poll(async () => readMoney(ui.cashBalance(page)), { timeout: 20_000 })
+      .toBeGreaterThan(cashBefore);
 
-    // Cash should have increased after selling
-    const cashAfterSell = page.locator("header").getByText(/\$[\d,]+\.\d{2}/).nth(1);
-    const cashSellText = await cashAfterSell.textContent();
-    const cashAfterSellValue = parseFloat(cashSellText!.replace(/[$,]/g, ""));
+    const api = await getPortfolio(request);
+    const position = api.positions.find((p) => p.ticker === "MSFT");
+    expect(position, "MSFT position should still exist after a partial sell").toBeDefined();
+    expect(position!.quantity).toBe(6);
+    await expect(ui.positionRow(page, "MSFT")).toContainText("6");
+  });
 
-    expect(cashAfterSellValue).toBeGreaterThan(cashAfterBuyValue);
+  test("selling the full position removes it from the table", async ({ page, request }) => {
+    await ensureWatched(request, "GOOGL");
+    await flattenPosition(request, "GOOGL");
+    await apiTrade(request, "GOOGL", "buy", 2);
+
+    await openApp(page);
+    await expect(ui.positionRow(page, "GOOGL")).toBeVisible();
+
+    await ui.tradeTicker(page).fill("GOOGL");
+    await ui.tradeQty(page).fill("2");
+    await ui.tradeSell(page).click();
+
+    await expect(ui.tradeStatus(page)).toContainText(/SELL 2 GOOGL/);
+    await expect(ui.positionRow(page, "GOOGL")).toHaveCount(0, { timeout: 20_000 });
+
+    const api = await getPortfolio(request);
+    expect(api.positions.map((p) => p.ticker)).not.toContain("GOOGL");
+  });
+
+  test("buying beyond available cash is rejected with an error", async ({ page, request }) => {
+    await ensureWatched(request, "NVDA");
+    await openApp(page);
+
+    const cashBefore = (await getPortfolio(request)).cash;
+
+    await ui.tradeTicker(page).fill("NVDA");
+    await ui.tradeQty(page).fill("100000");
+    await ui.tradeBuy(page).click();
+
+    await expect(ui.tradeStatus(page)).toContainText(/insufficient cash/i, { timeout: 20_000 });
+
+    // The rejected order must not have moved any money.
+    const cashAfter = (await getPortfolio(request)).cash;
+    expect(cashAfter).toBe(cashBefore);
+  });
+
+  test("selling more shares than held is rejected with an error", async ({ page, request }) => {
+    await ensureWatched(request, "META");
+    await flattenPosition(request, "META");
+    await openApp(page);
+
+    await ui.tradeTicker(page).fill("META");
+    await ui.tradeQty(page).fill("50");
+    await ui.tradeSell(page).click();
+
+    await expect(ui.tradeStatus(page)).toContainText(/insufficient shares/i, { timeout: 20_000 });
+    const api = await getPortfolio(request);
+    expect(api.positions.map((p) => p.ticker)).not.toContain("META");
   });
 });

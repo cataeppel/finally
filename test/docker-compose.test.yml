@@ -1,13 +1,54 @@
+# E2E test stack: the production app image plus a Playwright runner, so browser
+# dependencies stay out of the shipped image (PLAN.md §12).
+#
+# Usage (from the repository root):
+#   docker compose -f test/docker-compose.test.yml down -v          # clean volume
+#   docker compose -f test/docker-compose.test.yml up -d --build app
+#   docker compose -f test/docker-compose.test.yml run --rm playwright
+#
+# The suite asserts pristine seed state in its first project, so always start
+# from a clean `finally-test-data` volume.
 services:
   app:
-    image: finally
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: finally:test
     ports:
       - "8000:8000"
     environment:
-      - LLM_MOCK=true
-      - OPENROUTER_API_KEY=test
+      LLM_MOCK: "true"
+      OPENROUTER_API_KEY: "test-key-not-used"
+      MASSIVE_API_KEY: ""
+    volumes:
+      - finally-test-data:/app/db
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 2s
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status == 200 else 1)"
+      interval: 3s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 10s
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.58.2-noble
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      FINALLY_BASE_URL: "http://app:8000"
+      CI: "true"
+    working_dir: /work
+    volumes:
+      - ..:/work
+      # Keep the container's Linux node_modules out of the host bind mount.
+      - playwright-node-modules:/work/test/node_modules
+    command: >-
+      sh -c "cd /work/test && npm ci && npx playwright test"
+
+volumes:
+  finally-test-data:
+  playwright-node-modules:

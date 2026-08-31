@@ -1,16 +1,24 @@
 {
-  "name": "test",
+  "name": "finally-e2e",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "playwright test"
-  },
-  "keywords": [],
-  "author": "",
+  "private": true,
+  "description": "Playwright end-to-end tests for FinAlly (PLAN.md §12)",
   "license": "ISC",
   "type": "commonjs",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:report": "playwright show-report",
+    "typecheck": "tsc --noEmit",
+    "docker:up": "docker compose -f docker-compose.test.yml up -d --build app",
+    "docker:down": "docker compose -f docker-compose.test.yml down -v",
+    "docker:test": "docker compose -f docker-compose.test.yml run --rm playwright"
+  },
   "dependencies": {
-    "@playwright/test": "^1.58.2"
+    "@playwright/test": "1.58.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.7.2"
   }
 }

@@ -27,6 +27,7 @@ export interface Position {
 export interface Portfolio {
   cash_balance: number;
   total_value: number;
+  unrealized_pnl: number;
   positions: Position[];
 }
 
@@ -90,4 +91,15 @@ export interface ChatResponse {
 }
 
 /** Connection status for SSE */
-export type ConnectionStatus = "connected" | "connecting" | "disconnected";
+export type ConnectionStatus =
+  | "connected"
+  | "connecting"
+  | "reconnecting"
+  | "disconnected";
+
+/** A single accumulated price sample, used for sparklines and the main chart */
+export interface PricePoint {
+  /** Unix seconds */
+  time: number;
+  price: number;
+}

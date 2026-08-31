@@ -1,26 +1,39 @@
 """Tests for the database layer."""
 
+import asyncio
 import json
+import os
+import uuid
+from datetime import datetime
 
 import pytest
 
 from app.db import (
     DEFAULT_CASH_BALANCE,
     DEFAULT_TICKERS,
+    DuplicateTickerError,
+    InsufficientCashError,
+    InsufficientSharesError,
     add_to_watchlist,
+    apply_trade,
+    connect,
     delete_position,
     get_cash_balance,
     get_chat_history,
+    get_db_path,
     get_portfolio_history,
     get_position,
     get_positions,
+    get_trades,
     get_watchlist,
+    get_watchlist_tickers,
     init_db,
     insert_chat_message,
     insert_snapshot,
     insert_trade,
     remove_from_watchlist,
     set_db_path,
+    transaction,
     update_cash_balance,
     upsert_position,
 )
@@ -33,8 +46,7 @@ async def temp_db(tmp_path):
     set_db_path(db_path)
     await init_db()
     yield db_path
-    # Clean up the global path
-    set_db_path(db_path)
+    set_db_path(None)
 
 
 class TestInitialization:
@@ -204,3 +216,248 @@ class TestChatMessages:
     async def test_empty_chat_history(self):
         messages = await get_chat_history()
         assert messages == []
+
+
+class TestTradeLog:
+    async def test_get_trades_empty(self):
+        assert await get_trades() == []
+
+    async def test_get_trades_oldest_first(self):
+        for i in range(3):
+            await insert_trade("AAPL", "buy", i + 1, 100.0 + i)
+        trades = await get_trades()
+        assert [t["quantity"] for t in trades] == [1, 2, 3]
+
+    async def test_get_trades_limit_returns_most_recent(self):
+        for i in range(5):
+            await insert_trade("AAPL", "buy", i + 1, 100.0)
+        trades = await get_trades(limit=2)
+        assert [t["quantity"] for t in trades] == [4, 5]
+
+
+class TestApplyTrade:
+    async def test_buy_updates_cash_position_and_log(self):
+        result = await apply_trade("AAPL", "buy", 10, 150.0)
+
+        assert result["cash"] == pytest.approx(10000.0 - 1500.0)
+        assert result["position"]["quantity"] == 10
+        assert result["position"]["avg_cost"] == pytest.approx(150.0)
+        assert result["trade"]["side"] == "buy"
+
+        assert await get_cash_balance() == pytest.approx(8500.0)
+        assert len(await get_trades()) == 1
+
+    async def test_buy_averages_cost(self):
+        await apply_trade("AAPL", "buy", 10, 100.0)
+        result = await apply_trade("AAPL", "buy", 10, 200.0)
+        assert result["position"]["quantity"] == 20
+        assert result["position"]["avg_cost"] == pytest.approx(150.0)
+
+    async def test_insufficient_cash_leaves_nothing_applied(self):
+        with pytest.raises(InsufficientCashError):
+            await apply_trade("AAPL", "buy", 1000, 150.0)
+
+        assert await get_cash_balance() == pytest.approx(10000.0)
+        assert await get_position("AAPL") is None
+        assert await get_trades() == []
+
+    async def test_partial_sell_keeps_avg_cost(self):
+        await apply_trade("AAPL", "buy", 10, 100.0)
+        result = await apply_trade("AAPL", "sell", 4, 120.0)
+
+        assert result["position"]["quantity"] == pytest.approx(6)
+        assert result["position"]["avg_cost"] == pytest.approx(100.0)
+        assert result["cash"] == pytest.approx(10000.0 - 1000.0 + 480.0)
+
+    async def test_full_sell_removes_position(self):
+        await apply_trade("AAPL", "buy", 10, 100.0)
+        result = await apply_trade("AAPL", "sell", 10, 90.0)
+
+        assert result["position"] is None
+        assert await get_position("AAPL") is None
+        assert await get_cash_balance() == pytest.approx(9900.0)
+
+    async def test_sell_more_than_held_raises(self):
+        await apply_trade("AAPL", "buy", 5, 100.0)
+        with pytest.raises(InsufficientSharesError):
+            await apply_trade("AAPL", "sell", 6, 100.0)
+
+        pos = await get_position("AAPL")
+        assert pos["quantity"] == 5
+        assert len(await get_trades()) == 1
+
+    async def test_sell_with_no_position_raises(self):
+        with pytest.raises(InsufficientSharesError):
+            await apply_trade("ZZZZ", "sell", 1, 10.0)
+
+    async def test_fractional_shares(self):
+        result = await apply_trade("AAPL", "buy", 0.5, 100.0)
+        assert result["position"]["quantity"] == pytest.approx(0.5)
+        assert result["cash"] == pytest.approx(9950.0)
+
+    async def test_ticker_and_side_are_normalized(self):
+        result = await apply_trade("aapl", "BUY", 1, 100.0)
+        assert result["trade"]["ticker"] == "AAPL"
+        assert result["trade"]["side"] == "buy"
+
+    async def test_invalid_side_raises_value_error(self):
+        with pytest.raises(ValueError):
+            await apply_trade("AAPL", "hold", 1, 100.0)
+
+    async def test_non_positive_quantity_raises_value_error(self):
+        with pytest.raises(ValueError):
+            await apply_trade("AAPL", "buy", 0, 100.0)
+
+    async def test_buy_exactly_all_cash_succeeds(self):
+        result = await apply_trade("AAPL", "buy", 100, 100.0)
+        assert result["cash"] == pytest.approx(0.0)
+
+    async def test_concurrent_trades_do_not_lose_updates(self):
+        results = await asyncio.gather(
+            *(apply_trade("AAPL", "buy", 1, 100.0) for _ in range(5))
+        )
+        assert len(results) == 5
+        pos = await get_position("AAPL")
+        assert pos["quantity"] == pytest.approx(5)
+        assert await get_cash_balance() == pytest.approx(9500.0)
+        assert len(await get_trades()) == 5
+
+
+class TestWatchlistErrors:
+    async def test_duplicate_raises_typed_error(self):
+        with pytest.raises(DuplicateTickerError):
+            await add_to_watchlist("AAPL")
+
+    async def test_duplicate_is_case_insensitive(self):
+        with pytest.raises(DuplicateTickerError):
+            await add_to_watchlist("aapl")
+
+    async def test_watchlist_tickers_helper(self):
+        tickers = await get_watchlist_tickers()
+        assert sorted(tickers) == sorted(DEFAULT_TICKERS)
+
+
+class TestPortfolioHistoryLimit:
+    async def test_limit_returns_most_recent_oldest_first(self):
+        for value in (100.0, 200.0, 300.0, 400.0):
+            await insert_snapshot(value)
+        history = await get_portfolio_history(limit=2)
+        assert [s["total_value"] for s in history] == [300.0, 400.0]
+
+
+class TestLazyInitialization:
+    async def test_repository_call_initializes_a_fresh_file(self, tmp_path):
+        fresh = tmp_path / "nested" / "fresh.db"
+        set_db_path(str(fresh))
+
+        # No explicit init_db(): the first repository call must create and seed.
+        balance = await get_cash_balance()
+
+        assert fresh.exists()
+        assert balance == DEFAULT_CASH_BALANCE
+        assert len(await get_watchlist()) == len(DEFAULT_TICKERS)
+
+    async def test_init_preserves_existing_data(self, tmp_path):
+        path = str(tmp_path / "persist.db")
+        set_db_path(path)
+        await init_db()
+        await update_cash_balance(1234.0)
+        await remove_from_watchlist("AAPL")
+
+        await init_db()
+
+        assert await get_cash_balance() == 1234.0
+        assert "AAPL" not in await get_watchlist_tickers()
+
+    async def test_data_persists_across_connections(self, tmp_path):
+        path = str(tmp_path / "reopen.db")
+        set_db_path(path)
+        await apply_trade("MSFT", "buy", 2, 400.0)
+
+        # Every repository call opens a new connection, so this reads from disk.
+        set_db_path(path)
+        pos = await get_position("MSFT")
+        assert pos["quantity"] == 2
+
+
+class TestDbPath:
+    async def test_env_var_is_used_when_no_override(self, tmp_path, monkeypatch):
+        set_db_path(None)
+        target = str(tmp_path / "from_env.db")
+        monkeypatch.setenv("FINALLY_DB_PATH", target)
+        assert get_db_path() == target
+
+    async def test_override_wins_over_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FINALLY_DB_PATH", str(tmp_path / "env.db"))
+        override = str(tmp_path / "override.db")
+        set_db_path(override)
+        assert get_db_path() == override
+
+    async def test_default_path_is_the_repo_db_volume(self, monkeypatch):
+        set_db_path(None)
+        monkeypatch.delenv("FINALLY_DB_PATH", raising=False)
+        # <repo>/db/finally.db — the Docker volume mount target (/app/db).
+        assert get_db_path().endswith(os.path.join("db", "finally.db"))
+        assert os.path.isdir(os.path.dirname(get_db_path()))
+
+
+class TestSchema:
+    async def test_all_tables_exist(self):
+        async with connect() as db:
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            names = {row["name"] for row in await cursor.fetchall()}
+        assert {
+            "users_profile",
+            "watchlist",
+            "positions",
+            "trades",
+            "portfolio_snapshots",
+            "chat_messages",
+        } <= names
+
+    @pytest.mark.parametrize(
+        "table", ["watchlist", "positions", "trades", "portfolio_snapshots", "chat_messages"]
+    )
+    async def test_user_id_defaults_to_default(self, table):
+        async with connect() as db:
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            cols = {row["name"]: row for row in await cursor.fetchall()}
+        assert cols["user_id"]["dflt_value"] == "'default'"
+
+    @pytest.mark.parametrize("table", ["watchlist", "positions"])
+    async def test_user_ticker_is_unique(self, table):
+        async with connect() as db:
+            cursor = await db.execute(f"PRAGMA index_list({table})")
+            unique_indexes = [row["name"] for row in await cursor.fetchall() if row["unique"]]
+            columns = set()
+            for index in unique_indexes:
+                cursor = await db.execute(f"PRAGMA index_info({index})")
+                columns.add(tuple(row["name"] for row in await cursor.fetchall()))
+        assert ("user_id", "ticker") in columns
+
+    async def test_primary_keys_are_uuids(self):
+        entry = await add_to_watchlist("PYPL")
+        uuid.UUID(entry["id"])
+
+    async def test_timestamps_are_iso_strings(self):
+        trade = await insert_trade("AAPL", "buy", 1, 100.0)
+        parsed = datetime.fromisoformat(trade["executed_at"])
+        assert parsed.tzinfo is not None
+
+
+class TestTransaction:
+    async def test_rolls_back_on_error(self):
+        with pytest.raises(RuntimeError):
+            async with transaction() as db:
+                await db.execute(
+                    "UPDATE users_profile SET cash_balance = ? WHERE id = 'default'", (1.0,)
+                )
+                raise RuntimeError("boom")
+        assert await get_cash_balance() == DEFAULT_CASH_BALANCE
+
+    async def test_commits_on_success(self):
+        async with transaction() as db:
+            await db.execute(
+                "UPDATE users_profile SET cash_balance = ? WHERE id = 'default'", (42.0,)
+            )
+        assert await get_cash_balance() == 42.0

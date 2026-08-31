@@ -14,43 +14,79 @@
   --color-accent-purple: #753991;
   --color-gain: #26a641;
   --color-loss: #f85149;
-  --font-mono: "Geist Mono", ui-monospace, monospace;
-  --font-sans: "Geist", ui-sans-serif, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
   background: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
 }
 
-/* Price flash animations */
+::selection {
+  background: rgba(32, 157, 215, 0.35);
+}
+
+:focus-visible {
+  outline: 1px solid var(--color-accent-blue);
+  outline-offset: 1px;
+}
+
+/* Price flash — a brief tinted wash that fades back to the row background. */
 @keyframes flash-green {
-  0% { background-color: rgba(38, 166, 65, 0.3); }
-  100% { background-color: transparent; }
+  0% {
+    background-color: rgba(38, 166, 65, 0.32);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
 @keyframes flash-red {
-  0% { background-color: rgba(248, 81, 73, 0.3); }
-  100% { background-color: transparent; }
+  0% {
+    background-color: rgba(248, 81, 73, 0.32);
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
-.price-flash-up {
+/*
+ * The flash class is set on the row (that is the hook tests poll) but the wash
+ * is scoped to the quote cell: every ticker updates on every batch, so tinting
+ * whole rows would leave the entire watchlist permanently coloured.
+ */
+.price-flash-up .flash-target {
   animation: flash-green 500ms ease-out;
 }
 
-.price-flash-down {
+.price-flash-down .flash-target {
   animation: flash-red 500ms ease-out;
 }
 
-/* Scrollbar styling */
+@media (prefers-reduced-motion: reduce) {
+  .price-flash-up .flash-target,
+  .price-flash-down .flash-target {
+    animation-duration: 1ms;
+  }
+}
+
+/* Slim terminal scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-bg-primary);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
@@ -60,4 +96,16 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-muted);
+}
+
+/* Hide the number input spinners — quantity is typed, not stepped. */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
 }

@@ -141,3 +141,51 @@ class TestPortfolioHistory:
         snapshots = resp.json()["snapshots"]
         assert len(snapshots) == 1
         assert snapshots[0]["total_value"] > 0
+
+
+class TestTradeRouteValidation:
+    async def test_invalid_ticker_is_rejected(self, client):
+        resp = await client.post(
+            "/api/portfolio/trade",
+            json={"ticker": "AA PL", "side": "buy", "quantity": 1},
+        )
+        assert resp.status_code == 400
+        assert "Invalid ticker" in resp.json()["detail"]
+
+    async def test_ticker_and_side_are_normalized(self, client):
+        resp = await client.post(
+            "/api/portfolio/trade",
+            json={"ticker": "aapl", "side": "BUY", "quantity": 1},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["trade"]["ticker"] == "AAPL"
+        assert resp.json()["trade"]["side"] == "buy"
+
+    async def test_response_carries_updated_totals(self, client):
+        resp = await client.post(
+            "/api/portfolio/trade",
+            json={"ticker": "AAPL", "side": "buy", "quantity": 2},
+        )
+        body = resp.json()
+        portfolio = (await client.get("/api/portfolio")).json()
+        assert body["cash"] == portfolio["cash"]
+        assert body["total_value"] == portfolio["total_value"]
+
+    async def test_missing_quantity_is_a_422(self, client):
+        resp = await client.post(
+            "/api/portfolio/trade", json={"ticker": "AAPL", "side": "buy"}
+        )
+        assert resp.status_code == 422
+
+
+class TestPortfolioHistoryOrdering:
+    async def test_snapshots_are_oldest_first(self, client):
+        for _ in range(3):
+            await client.post(
+                "/api/portfolio/trade",
+                json={"ticker": "AAPL", "side": "buy", "quantity": 1},
+            )
+        snapshots = (await client.get("/api/portfolio/history")).json()["snapshots"]
+        assert len(snapshots) == 3
+        recorded = [s["recorded_at"] for s in snapshots]
+        assert recorded == sorted(recorded)

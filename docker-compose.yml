@@ -1,12 +1,15 @@
 services:
   finally:
     build: .
+    image: finally_agents
+    container_name: finally_agents
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     volumes:
-      - finally-data:/app/db
+      - finally-data-agents:/app/db
     env_file:
       - .env
+    restart: unless-stopped
 
 volumes:
-  finally-data:
+  finally-data-agents:

@@ -1,19 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PriceMap, WatchlistItem } from "@/lib/types";
+import type { PriceMap, PricePoint, WatchlistItem } from "@/lib/types";
 import { formatPrice, formatPercent } from "@/lib/format";
 import { addToWatchlist, removeFromWatchlist } from "@/lib/api";
+import Panel, { PanelEmpty } from "./Panel";
 import Sparkline from "./Sparkline";
 
 interface WatchlistProps {
   items: WatchlistItem[];
   prices: PriceMap;
-  getHistory: (ticker: string) => number[];
+  getHistory: (ticker: string) => PricePoint[];
   selectedTicker: string | null;
   onSelectTicker: (ticker: string) => void;
   onRefresh: () => void;
 }
+
+/** Samples shown in each row's sparkline. */
+const SPARK_POINTS = 60;
 
 export default function Watchlist({
   items,
@@ -24,10 +28,12 @@ export default function Watchlist({
   onRefresh,
 }: WatchlistProps) {
   const [addInput, setAddInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const prevPricesRef = useRef<Record<string, number>>({});
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
 
-  // Apply flash CSS classes directly to DOM elements
+  // Flash each row green/red on every tick. Applied imperatively so the
+  // animation restarts cleanly without re-rendering the row.
   useEffect(() => {
     for (const [ticker, update] of Object.entries(prices)) {
       const prev = prevPricesRef.current[ticker];
@@ -36,8 +42,7 @@ export default function Watchlist({
         if (row) {
           const cls = update.price > prev ? "price-flash-up" : "price-flash-down";
           row.classList.remove("price-flash-up", "price-flash-down");
-          // Force reflow to restart animation
-          void row.offsetWidth;
+          void row.offsetWidth; // Force reflow so the animation replays
           row.classList.add(cls);
         }
       }
@@ -48,107 +53,159 @@ export default function Watchlist({
   const handleAdd = useCallback(async () => {
     const ticker = addInput.trim().toUpperCase();
     if (!ticker) return;
-    await addToWatchlist(ticker);
-    setAddInput("");
-    onRefresh();
+    try {
+      setError(null);
+      await addToWatchlist(ticker);
+      setAddInput("");
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not add ${ticker}`);
+    }
   }, [addInput, onRefresh]);
 
   const handleRemove = useCallback(
     async (ticker: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      await removeFromWatchlist(ticker);
-      onRefresh();
+      try {
+        setError(null);
+        await removeFromWatchlist(ticker);
+        onRefresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `Could not remove ${ticker}`);
+      }
     },
     [onRefresh]
   );
 
+  const addControls = (
+    <div className="flex items-center gap-1">
+      <input
+        type="text"
+        value={addInput}
+        onChange={(e) => setAddInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleAdd();
+        }}
+        placeholder="Add symbol"
+        aria-label="Add ticker to watchlist"
+        data-testid="watchlist-add-input"
+        className="w-24 rounded border border-border bg-bg-primary px-1.5 py-0.5 text-[11px] uppercase text-text-primary placeholder:normal-case placeholder:text-text-muted focus:border-accent-blue focus:outline-none"
+      />
+      <button
+        onClick={handleAdd}
+        aria-label="Add to watchlist"
+        data-testid="watchlist-add-button"
+        className="rounded border border-border px-1.5 text-[11px] leading-5 text-accent-blue transition-colors hover:border-accent-blue hover:text-accent-yellow"
+      >
+        +
+      </button>
+    </div>
+  );
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-        <h2 className="text-xs font-bold text-text-secondary uppercase tracking-wider">
-          Watchlist
-        </h2>
-        <div className="flex items-center gap-1">
-          <input
-            type="text"
-            value={addInput}
-            onChange={(e) => setAddInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-            placeholder="Add ticker"
-            className="w-20 bg-bg-primary border border-border rounded px-1.5 py-0.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
-          />
-          <button
-            onClick={handleAdd}
-            className="text-xs text-accent-blue hover:text-accent-yellow px-1"
+    <Panel title="Watchlist" actions={addControls}>
+      <div className="flex h-full flex-col">
+        {error && (
+          <div
+            className="border-b border-border bg-loss/10 px-3 py-1 text-[11px] text-loss"
+            data-testid="watchlist-error"
           >
-            +
-          </button>
+            {error}
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {items.length === 0 ? (
+            <PanelEmpty>Watchlist is empty — add a symbol above.</PanelEmpty>
+          ) : (
+            <table className="w-full text-xs" data-testid="watchlist">
+              <thead className="sticky top-0 z-10 bg-bg-panel">
+                <tr className="border-b border-border text-[10px] uppercase tracking-wider text-text-muted">
+                  <th className="px-3 py-1.5 text-left font-normal">Ticker</th>
+                  <th className="px-2 py-1.5 text-right font-normal">Price</th>
+                  <th className="px-2 py-1.5 text-right font-normal">Chg%</th>
+                  <th className="px-2 py-1.5 text-right font-normal">Chart</th>
+                  <th className="w-6" />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => {
+                  const update = prices[item.ticker];
+                  const price = update?.price ?? item.price ?? 0;
+                  const isSelected = selectedTicker === item.ticker;
+                  const history = getHistory(item.ticker);
+                  const spark = history.slice(-SPARK_POINTS).map((p) => p.price);
+
+                  // Change since the session opened, which is stable and matches
+                  // the sparkline. Until two samples exist, fall back to the
+                  // tick-over-tick delta the stream reports.
+                  const sessionOpen = history[0]?.price;
+                  const changePct =
+                    sessionOpen && history.length > 1
+                      ? ((price - sessionOpen) / sessionOpen) * 100
+                      : (update?.change_percent ?? item.change_percent ?? 0);
+                  const trend =
+                    changePct > 0 ? "up" : changePct < 0 ? "down" : "flat";
+
+                  return (
+                    <tr
+                      key={item.ticker}
+                      ref={(el) => {
+                        rowRefs.current[item.ticker] = el;
+                      }}
+                      onClick={() => onSelectTicker(item.ticker)}
+                      data-testid={`watchlist-row-${item.ticker}`}
+                      className={`group cursor-pointer border-b border-border/40 transition-colors hover:bg-bg-hover ${
+                        isSelected ? "bg-bg-hover" : ""
+                      }`}
+                    >
+                      <td className="relative px-3 py-1.5 font-bold text-text-primary">
+                        {isSelected && (
+                          <span className="absolute inset-y-0 left-0 w-0.5 bg-accent-yellow" />
+                        )}
+                        {item.ticker}
+                      </td>
+                      <td
+                        data-testid={`watchlist-price-${item.ticker}`}
+                        className="flash-target px-2 py-1.5 text-right tabular-nums text-text-primary"
+                      >
+                        {formatPrice(price)}
+                      </td>
+                      <td
+                        className={`px-2 py-1.5 text-right tabular-nums ${
+                          trend === "up"
+                            ? "text-gain"
+                            : trend === "down"
+                              ? "text-loss"
+                              : "text-text-muted"
+                        }`}
+                      >
+                        {formatPercent(changePct)}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <Sparkline
+                          data={spark}
+                          testId={`watchlist-sparkline-${item.ticker}`}
+                        />
+                      </td>
+                      <td className="pr-2">
+                        <button
+                          onClick={(e) => handleRemove(item.ticker, e)}
+                          data-testid={`watchlist-remove-${item.ticker}`}
+                          className="text-xs leading-none text-text-muted opacity-40 transition-opacity hover:text-loss group-hover:opacity-100 focus:opacity-100"
+                          title={`Remove ${item.ticker} from watchlist`}
+                          aria-label={`Remove ${item.ticker} from watchlist`}
+                        >
+                          ×
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
-
-      <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-text-muted border-b border-border">
-              <th className="text-left px-3 py-1.5 font-normal">Ticker</th>
-              <th className="text-right px-2 py-1.5 font-normal">Price</th>
-              <th className="text-right px-2 py-1.5 font-normal">Chg%</th>
-              <th className="text-right px-3 py-1.5 font-normal">Chart</th>
-              <th className="w-6"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => {
-              const update = prices[item.ticker];
-              const price = update?.price ?? item.price ?? 0;
-              const changePct = update?.change_percent ?? item.change_percent ?? 0;
-              const direction = update?.direction ?? item.direction ?? "flat";
-              const isSelected = selectedTicker === item.ticker;
-
-              return (
-                <tr
-                  key={item.ticker}
-                  ref={(el) => { rowRefs.current[item.ticker] = el; }}
-                  onClick={() => onSelectTicker(item.ticker)}
-                  className={`cursor-pointer border-b border-border/50 hover:bg-bg-hover transition-colors ${
-                    isSelected ? "bg-bg-hover" : ""
-                  }`}
-                >
-                  <td className="px-3 py-1.5 font-bold text-text-primary">
-                    {item.ticker}
-                  </td>
-                  <td className="text-right px-2 py-1.5 tabular-nums">
-                    {formatPrice(price)}
-                  </td>
-                  <td
-                    className={`text-right px-2 py-1.5 tabular-nums ${
-                      direction === "up"
-                        ? "text-gain"
-                        : direction === "down"
-                        ? "text-loss"
-                        : "text-text-muted"
-                    }`}
-                  >
-                    {formatPercent(changePct)}
-                  </td>
-                  <td className="text-right px-3 py-1.5">
-                    <Sparkline data={getHistory(item.ticker)} />
-                  </td>
-                  <td className="pr-2">
-                    <button
-                      onClick={(e) => handleRemove(item.ticker, e)}
-                      className="text-text-muted hover:text-loss text-xs leading-none"
-                      title="Remove from watchlist"
-                    >
-                      x
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </Panel>
   );
 }

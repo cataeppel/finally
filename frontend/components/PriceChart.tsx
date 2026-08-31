@@ -1,52 +1,71 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { createChart, LineSeries, type IChartApi, type ISeriesApi, type LineData, type Time } from "lightweight-charts";
+import {
+  createChart,
+  AreaSeries,
+  type IChartApi,
+  type ISeriesApi,
+  type AreaData,
+  type Time,
+} from "lightweight-charts";
+import type { PriceMap, PricePoint } from "@/lib/types";
+import { formatPrice, formatPercent } from "@/lib/format";
+import Panel, { PanelEmpty } from "./Panel";
 
 interface PriceChartProps {
   ticker: string | null;
-  getHistory: (ticker: string) => number[];
+  getHistory: (ticker: string) => PricePoint[];
+  prices: PriceMap;
+  /** Increments on every SSE batch; drives the incremental chart update. */
+  revision: number;
 }
 
-export default function PriceChart({ ticker, getHistory }: PriceChartProps) {
+export default function PriceChart({ ticker, getHistory, prices, revision }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
+  /** Ticker currently loaded into the series, so we know when to reseed. */
+  const loadedTickerRef = useRef<string | null>(null);
 
-  // Create chart once
+  // Create the chart once and keep it for the component's lifetime.
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const chart = createChart(containerRef.current, {
+    const chart = createChart(container, {
       layout: {
-        background: { color: "#161b22" },
-        textColor: "#8b949e",
+        background: { color: "transparent" },
+        textColor: "#6e7681",
         fontFamily: "ui-monospace, monospace",
-        fontSize: 11,
+        fontSize: 10,
+        attributionLogo: false,
       },
       grid: {
-        vertLines: { color: "#21262d" },
-        horzLines: { color: "#21262d" },
+        vertLines: { color: "#1c2128" },
+        horzLines: { color: "#1c2128" },
       },
       crosshair: {
-        vertLine: { color: "#30363d", labelBackgroundColor: "#30363d" },
-        horzLine: { color: "#30363d", labelBackgroundColor: "#30363d" },
+        vertLine: { color: "#484f58", labelBackgroundColor: "#209dd7", width: 1 },
+        horzLine: { color: "#484f58", labelBackgroundColor: "#209dd7" },
       },
-      rightPriceScale: {
-        borderColor: "#30363d",
-      },
+      rightPriceScale: { borderColor: "#30363d" },
       timeScale: {
         borderColor: "#30363d",
         timeVisible: true,
-        secondsVisible: false,
+        secondsVisible: true,
       },
+      handleScale: { axisPressedMouseMove: false },
     });
 
-    const series = chart.addSeries(LineSeries, {
-      color: "#209dd7",
+    const series = chart.addSeries(AreaSeries, {
+      lineColor: "#209dd7",
+      topColor: "rgba(32, 157, 215, 0.28)",
+      bottomColor: "rgba(32, 157, 215, 0)",
       lineWidth: 2,
-      crosshairMarkerRadius: 4,
-      crosshairMarkerBackgroundColor: "#209dd7",
+      priceLineVisible: true,
+      priceLineColor: "#ecad0a",
+      crosshairMarkerRadius: 3,
     });
 
     chartRef.current = chart;
@@ -55,68 +74,82 @@ export default function PriceChart({ ticker, getHistory }: PriceChartProps) {
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        chart.applyOptions({ width, height });
+        if (width > 0 && height > 0) chart.applyOptions({ width, height });
       }
     });
-    ro.observe(containerRef.current);
+    ro.observe(container);
 
     return () => {
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      loadedTickerRef.current = null;
     };
   }, []);
 
-  // Update data when ticker or history changes
+  // Reseed on ticker change, then append the newest sample on each SSE batch.
   useEffect(() => {
-    if (!seriesRef.current || !ticker) return;
+    const series = seriesRef.current;
+    if (!series || !ticker) return;
 
     const history = getHistory(ticker);
-    if (history.length === 0) {
-      seriesRef.current.setData([]);
-      return;
+
+    if (loadedTickerRef.current !== ticker) {
+      loadedTickerRef.current = ticker;
+      const data: AreaData[] = history.map((p) => ({
+        time: p.time as Time,
+        value: p.price,
+      }));
+      series.setData(data);
+    } else {
+      const latest = history[history.length - 1];
+      if (!latest) return;
+      // `update` also replaces the last point when the timestamp repeats.
+      series.update({ time: latest.time as Time, value: latest.price });
     }
 
-    const now = Math.floor(Date.now() / 1000);
-    const data: LineData[] = history.map((price, i) => ({
-      time: (now - (history.length - 1 - i)) as Time,
-      value: price,
-    }));
+    // The window grows from a single tick at page load, so refit on every
+    // batch — otherwise the time scale keeps the tiny initial span and the
+    // chart shows only the newest couple of points.
+    if (history.length > 1) chartRef.current?.timeScale().fitContent();
+  }, [ticker, getHistory, revision]);
 
-    seriesRef.current.setData(data);
-    chartRef.current?.timeScale().fitContent();
-  }, [ticker, getHistory]);
+  const quote = ticker ? prices[ticker] : undefined;
 
-  // Update latest data point on each render (called frequently as prices update)
-  useEffect(() => {
-    if (!seriesRef.current || !ticker) return;
-    const history = getHistory(ticker);
-    if (history.length === 0) return;
-
-    const now = Math.floor(Date.now() / 1000);
-    seriesRef.current.update({
-      time: now as Time,
-      value: history[history.length - 1],
-    });
-  });
-
-  if (!ticker) {
-    return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm">
-        Select a ticker from the watchlist
-      </div>
-    );
-  }
+  const readout = quote ? (
+    <div className="flex items-baseline gap-2">
+      <span className="text-sm font-bold tabular-nums text-text-primary">
+        {formatPrice(quote.price)}
+      </span>
+      <span
+        className={`text-[11px] font-bold tabular-nums ${
+          quote.direction === "up"
+            ? "text-gain"
+            : quote.direction === "down"
+              ? "text-loss"
+              : "text-text-muted"
+        }`}
+      >
+        {formatPercent(quote.change_percent)}
+      </span>
+    </div>
+  ) : null;
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3 py-2 border-b border-border">
-        <h2 className="text-xs font-bold text-text-secondary uppercase tracking-wider">
-          {ticker} -- Price Chart
-        </h2>
+    <Panel
+      title={ticker ? `${ticker} · Price` : "Price Chart"}
+      actions={readout}
+      testId="price-chart"
+    >
+      <div className="relative h-full w-full">
+        <div ref={containerRef} className="h-full w-full" />
+        {!ticker && (
+          <div className="absolute inset-0">
+            <PanelEmpty>Select a ticker from the watchlist</PanelEmpty>
+          </div>
+        )}
       </div>
-      <div ref={containerRef} className="flex-1 min-h-0" />
-    </div>
+    </Panel>
   );
 }

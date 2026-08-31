@@ -1,18 +1,33 @@
+# Secrets — never bake environment files into the image
+.env
+.env.*
+
+# Git / tooling
+.git
+.gitignore
+.github
+.claude
+.DS_Store
+
+# Project docs and out-of-image test infrastructure
+planning
+test
+
+# Frontend build artefacts and deps (rebuilt inside the image)
 frontend/node_modules
-frontend/out
 frontend/.next
+frontend/out
+frontend/coverage
+
+# Python artefacts (venv is recreated by `uv sync` inside the image)
 backend/.venv
-backend/__pycache__
-backend/static
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# Runtime database (lives on the mounted volume, not in the image)
 db/finally.db
 db/finally.db-journal
 db/finally.db-wal
-.git
-.env
-*.pyc
-__pycache__
-.claude
-planning
-test
-.ruff_cache
-.pytest_cache
+db/finally.db-shm
